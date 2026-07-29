@@ -1,3 +1,4 @@
+// Forzando recarga de dependencias en Vercel - 2026
 
 const http = require('http');
 const crypto = require('crypto');
