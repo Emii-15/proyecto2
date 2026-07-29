@@ -138,7 +138,11 @@ const server = http.createServer(async (req,res)=>{
       });
     }
 
-    if(method==='GET') return serveFile(res,url.pathname==='/'?'index.html':url.pathname.slice(1));
+    if(method==='GET') {
+      const filePath = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
+      return serveFile(res, filePath);
+    }
+    
     json(res,404,{error:'No encontrado'});
   } catch (error) { 
     console.error(error);
