@@ -1,18 +1,44 @@
-// Forzando recarga de dependencias en Vercel - 2026
+// Forzando recarga de dependencias en Vercel - 2026 (Sin módulos externos pesados)
 
 const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { Pool } = require('pg');
 
 const PORT = process.env.PORT || 3000;
 const SECRET = process.env.JWT_SECRET || 'cambiar-esta-clave-en-produccion';
 
-const pool = new Pool({
-  connectionString: 'postgresql://postgres.vassruceqqjyejbiomza:Ubel152018Frieren123@aws-0-us-east-2.pooler.supabase.com:6543/postgres',
-  ssl: { rejectUnauthorized: false }
-});
+// Configuración para conectar a Supabase mediante su API REST nativa integrada (evita problemas con paquetes nativos de Node en Vercel)
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vassruceqqjyejbiomza.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'; // O usa tu conexión segura
+
+// Función auxiliar para hacer peticiones directas a Supabase sin requerir la librería 'pg'
+async function dbQuery(table, queryParams = '') {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${queryParams}`, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  if (!response.ok) throw new Error('Error en la consulta a Supabase');
+  return await response.json();
+}
+
+async function dbMutate(table, method, bodyData, queryParams = '') {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${queryParams}`, {
+    method: method,
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
+    },
+    body: JSON.stringify(bodyData)
+  });
+  if (!response.ok) throw new Error('Error en la mutación a Supabase');
+  return await response.json();
+}
 
 const b64url = value => Buffer.from(value).toString('base64url');
 function token(payload) { const head=b64url(JSON.stringify({alg:'HS256',typ:'JWT'})); const body=b64url(JSON.stringify(payload)); const sig=crypto.createHmac('sha256',SECRET).update(`${head}.${body}`).digest('base64url'); return `${head}.${body}.${sig}`; }
@@ -29,41 +55,35 @@ const server = http.createServer(async (req,res)=>{
     // LOGIN
     if(method==='POST' && url.pathname==='/api/auth/login') { 
       const {email,password}=await body(req); 
-      const client = await pool.connect();
-      try {
-        const result = await client.query('SELECT * FROM users WHERE email = $1', [email?.toLowerCase()]);
-        const user = result.rows[0];
-        if(!user || user.password !== password) return json(res,401,{error:'Credenciales inválidas'}); 
-        return json(res,200,{token:token({sub:email,role:user.role,exp:Math.floor(Date.now()/1000)+28800}),user:{name:user.name,role:user.role}});
-      } finally {
-        client.release();
-      }
+      const users = await dbQuery('users', `email=eq.${encodeURIComponent(email?.toLowerCase())}&limit=1`);
+      const user = users[0];
+      if(!user || user.password !== password) return json(res,401,{error:'Credenciales inválidas'}); 
+      return json(res,200,{token:token({sub:email,role:user.role,exp:Math.floor(Date.now()/1000)+28800}),user:{name:user.name,role:user.role}});
     }
 
     // RUTA ACTUAL (DRIVER)
     if(method==='GET' && url.pathname==='/api/routes/current') { 
       if(!auth(req,res,['driver'])) return; 
-      const client = await pool.connect();
-      try {
-        const routeRes = await client.query('SELECT * FROM routes LIMIT 1');
-        const routeData = routeRes.rows[0];
-        const ordersRes = await client.query('SELECT order_code as id, customer, address, status, notes FROM orders WHERE route_id = $1', [routeData.id]);
-        
-        const orders = ordersRes.rows.map(o => ({
-          ...o,
-          items: [['Bebida isotónica 500ml', 12], ['Agua mineral 1.5L', 8]]
-        }));
+      const routes = await dbQuery('routes', 'limit=1');
+      const routeData = routes[0];
+      const ordersRows = await dbQuery('orders', `route_id=eq.${routeData.id}`);
+      
+      const orders = ordersRows.map(o => ({
+        id: o.order_code,
+        customer: o.customer,
+        address: o.address,
+        status: o.status,
+        notes: o.notes,
+        items: [['Bebida isotónica 500ml', 12], ['Agua mineral 1.5L', 8]]
+      }));
 
-        return json(res,200, {
-          id: routeData.route_code,
-          zone: routeData.zone,
-          driver: routeData.driver_name,
-          finalized: routeData.finalized,
-          orders
-        });
-      } finally {
-        client.release();
-      }
+      return json(res,200, {
+        id: routeData.route_code,
+        zone: routeData.zone,
+        driver: routeData.driver_name,
+        finalized: routeData.finalized,
+        orders
+      });
     }
 
     // ACTUALIZAR PEDIDO (DRIVER)
@@ -73,55 +93,49 @@ const server = http.createServer(async (req,res)=>{
       const {status,notes=''}=await body(req); 
       if(!['Completa','Parcial'].includes(status)) return json(res,422,{error:'Estado inválido'});
       
-      const client = await pool.connect();
-      try {
-        const updateRes = await client.query(
-          'UPDATE orders SET status = $1, notes = $2, updated_at = NOW() WHERE order_code = $3 RETURNING order_code as id, customer, address, status, notes',
-          [status, notes, orderCode]
-        );
-        if(updateRes.rows.length === 0) return json(res,404,{error:'Pedido inexistente'});
-        return json(res,200, updateRes.rows[0]);
-      } finally {
-        client.release();
-      }
+      const updated = await dbMutate('orders', 'PATCH', { status, notes, updated_at: new Date().toISOString() }, `order_code=eq.${orderCode}`);
+      if(!updated || updated.length === 0) return json(res,404,{error:'Pedido inexistente'});
+      
+      const o = updated[0];
+      return json(res,200, { id: o.order_code, customer: o.customer, address: o.address, status: o.status, notes: o.notes });
     }
 
     // FINALIZAR RUTA (DRIVER)
     if(method==='POST' && url.pathname==='/api/routes/current/finalize') { 
       if(!auth(req,res,['driver'])) return; 
-      const client = await pool.connect();
-      try {
-        const pendingCheck = await client.query("SELECT * FROM orders WHERE status = 'Pendiente'");
-        if(pendingCheck.rows.length > 0) return json(res,422,{error:'Existen pedidos pendientes'});
-        
-        const updateRoute = await client.query('UPDATE routes SET finalized = true, finalized_at = NOW() RETURNING *');
-        return json(res,200, updateRoute.rows[0]);
-      } finally {
-        client.release();
-      }
+      const pendingCheck = await dbQuery('orders', 'status=eq.Pendiente');
+      if(pendingCheck.length > 0) return json(res,422,{error:'Existen pedidos pendientes'});
+      
+      const routes = await dbQuery('routes', 'limit=1');
+      const routeData = routes[0];
+      const updatedRoute = await dbMutate('routes', 'PATCH', { finalized: true, finalized_at: new Date().toISOString() }, `id=eq.${routeData.id}`);
+      return json(res,200, updatedRoute[0]);
     }
 
     // OPERACIONES ADMIN
     if(method==='GET' && url.pathname==='/api/admin/operations') { 
       if(!auth(req,res,['admin'])) return; 
-      const client = await pool.connect();
-      try {
-        const routeRes = await client.query('SELECT * FROM routes LIMIT 1');
-        const routeData = routeRes.rows[0];
-        const ordersRes = await client.query('SELECT order_code as id, customer, address, status, notes FROM orders WHERE route_id = $1', [routeData.id]);
-        
-        return json(res,200, {
-          routes: [{
-            id: routeData.route_code,
-            zone: routeData.zone,
-            driver: routeData.driver_name,
-            finalized: routeData.finalized,
-            orders: ordersRes.rows
-          }]
-        });
-      } finally {
-        client.release();
-      }
+      const routes = await dbQuery('routes', 'limit=1');
+      const routeData = routes[0];
+      const ordersRows = await dbQuery('orders', `route_id=eq.${routeData.id}`);
+      
+      const orders = ordersRows.map(o => ({
+        id: o.order_code,
+        customer: o.customer,
+        address: o.address,
+        status: o.status,
+        notes: o.notes
+      }));
+
+      return json(res,200, {
+        routes: [{
+          id: routeData.route_code,
+          zone: routeData.zone,
+          driver: routeData.driver_name,
+          finalized: routeData.finalized,
+          orders
+        }]
+      });
     }
 
     if(method==='GET') return serveFile(res,url.pathname==='/'?'index.html':url.pathname.slice(1));
