@@ -9,8 +9,10 @@ let state = JSON.parse(localStorage.getItem('rutalog-state')) || { user:null, or
 const save = () => localStorage.setItem('rutalog-state', JSON.stringify(state));
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { 'Content-Type':'application/json', ...(state.user ? {Authorization:`Bearer ${state.user.jwt}`} : {}), ...(options.headers || {}) } });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'No se pudo completar la operación');
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await response.json() : null;
+  if (!response.ok) throw new Error(data?.error || `La API respondio ${response.status}. Verifica el deployment de Vercel.`);
+  if (!data) throw new Error('La API no devolvio JSON. Verifica las funciones de Vercel.');
   return data;
 }
 const initials = n => n.split(' ').map(x=>x[0]).slice(0,2).join('');
