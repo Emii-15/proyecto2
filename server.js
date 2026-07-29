@@ -1,3 +1,5 @@
+// server.js - API Exclusiva (Los estáticos los sirve Vercel automáticamente)
+
 const http = require('http');
 const crypto = require('crypto');
 
@@ -161,3 +163,4 @@ if (!process.env.VERCEL && require.main === module) {
 }
 
 module.exports = handler;
+
