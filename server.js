@@ -8,9 +8,9 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 const SECRET = process.env.JWT_SECRET || 'cambiar-esta-clave-en-produccion';
 
-// Configuración para conectar a Supabase mediante su API REST nativa integrada (evita problemas con paquetes nativos de Node en Vercel)
+// Configuración para conectar a Supabase mediante su API REST nativa integrada
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vassruceqqjyejbiomza.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'; // O usa tu conexión segura
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...';
 
 // Función auxiliar para hacer peticiones directas a Supabase sin requerir la librería 'pg'
 async function dbQuery(table, queryParams = '') {
@@ -46,16 +46,18 @@ function verify(value) { try { const [h,p,s]=value.split('.'); const expected=cr
 function json(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); }
 function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',chunk=>raw+=chunk); req.on('end',()=>{try{resolve(raw?JSON.parse(raw):{});}catch(e){reject(e);}}); }); }
 function auth(req, res, roles) { const value=(req.headers.authorization||'').replace('Bearer ',''); const user=verify(value); if(!user || (roles && !roles.includes(user.role))) { json(res,403,{error:'No autorizado'}); return null; } return user; }
+
 function serveFile(res, file) {
-  const safe = path.basename(file || 'index.html');
-  // Apuntamos directamente a la ruta absoluta del archivo en el directorio actual
-  const target = path.join(process.cwd(), safe === '' ? 'index.html' : safe);
+  const cleanFile = file.startsWith('/') ? file.slice(1) : file;
+  const safe = path.basename(cleanFile || 'index.html');
+  // Usamos __dirname para asegurar que busque los archivos junto a server.js en Vercel
+  const target = path.join(__dirname, safe === '' ? 'index.html' : safe);
   const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
   
   fs.readFile(target, (err, data) => {
     if (err) {
-      // Si falla, intentamos leer index.html por defecto para las rutas de la SPA
-      fs.readFile(path.join(process.cwd(), 'index.html'), (err2, data2) => {
+      // Fallback a index.html para soportar rutas de SPA si fuera necesario
+      fs.readFile(path.join(__dirname, 'index.html'), (err2, data2) => {
         if (err2) return json(res, 404, { error: 'No encontrado' });
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(data2);
@@ -66,6 +68,7 @@ function serveFile(res, file) {
     res.end(data);
   });
 }
+
 const server = http.createServer(async (req,res)=>{
   try {
     const url=new URL(req.url,`http://${req.headers.host}`); const method=req.method;
@@ -157,8 +160,7 @@ const server = http.createServer(async (req,res)=>{
     }
 
     if(method==='GET') {
-      const filePath = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-      return serveFile(res, filePath);
+      return serveFile(res, url.pathname);
     }
     
     json(res,404,{error:'No encontrado'});
