@@ -46,8 +46,26 @@ function verify(value) { try { const [h,p,s]=value.split('.'); const expected=cr
 function json(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); }
 function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',chunk=>raw+=chunk); req.on('end',()=>{try{resolve(raw?JSON.parse(raw):{});}catch(e){reject(e);}}); }); }
 function auth(req, res, roles) { const value=(req.headers.authorization||'').replace('Bearer ',''); const user=verify(value); if(!user || (roles && !roles.includes(user.role))) { json(res,403,{error:'No autorizado'}); return null; } return user; }
-function serveFile(res, file) { const safe=path.basename(file || 'index.html'); const target=path.join(__dirname, safe); const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'}; fs.readFile(target,(err,data)=>{ if(err) return json(res,404,{error:'No encontrado'}); res.writeHead(200,{'Content-Type':types[path.extname(target)]||'application/octet-stream'}); res.end(data); }); }
-
+function serveFile(res, file) {
+  const safe = path.basename(file || 'index.html');
+  // Apuntamos directamente a la ruta absoluta del archivo en el directorio actual
+  const target = path.join(process.cwd(), safe === '' ? 'index.html' : safe);
+  const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+  
+  fs.readFile(target, (err, data) => {
+    if (err) {
+      // Si falla, intentamos leer index.html por defecto para las rutas de la SPA
+      fs.readFile(path.join(process.cwd(), 'index.html'), (err2, data2) => {
+        if (err2) return json(res, 404, { error: 'No encontrado' });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(data2);
+      });
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': types[path.extname(target)] || 'application/octet-stream' });
+    res.end(data);
+  });
+}
 const server = http.createServer(async (req,res)=>{
   try {
     const url=new URL(req.url,`http://${req.headers.host}`); const method=req.method;
