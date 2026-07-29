@@ -1,141 +1,163 @@
-require('dotenv').config();
-
 const http = require('http');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { Pool } = require('pg');
 
 const PORT = process.env.PORT || 3000;
-const SECRET = process.env.JWT_SECRET || 'cambiar-esta-clave-en-produccion';
+const SECRET = process.env.JWT_SECRET;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const pool = new Pool({
-  connectionString: 'postgresql://postgres.vassruceqqjyejbiomza:Ubel152018Frieren123@aws-0-us-east-2.pooler.supabase.com:6543/postgres',
-  ssl: { rejectUnauthorized: false }
-});
-
-const b64url = value => Buffer.from(value).toString('base64url');
-function token(payload) { const head=b64url(JSON.stringify({alg:'HS256',typ:'JWT'})); const body=b64url(JSON.stringify(payload)); const sig=crypto.createHmac('sha256',SECRET).update(`${head}.${body}`).digest('base64url'); return `${head}.${body}.${sig}`; }
-function verify(value) { try { const [h,p,s]=value.split('.'); const expected=crypto.createHmac('sha256',SECRET).update(`${h}.${p}`).digest('base64url'); if(!crypto.timingSafeEqual(Buffer.from(s),Buffer.from(expected))) return null; const data=JSON.parse(Buffer.from(p,'base64url').toString()); return data.exp>Date.now()/1000?data:null; } catch { return null; } }
-function json(res,status,data) { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); }
-function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',chunk=>raw+=chunk); req.on('end',()=>{try{resolve(raw?JSON.parse(raw):{});}catch(e){reject(e);}}); }); }
-function auth(req, res, roles) { const value=(req.headers.authorization||'').replace('Bearer ',''); const user=verify(value); if(!user || (roles && !roles.includes(user.role))) { json(res,403,{error:'No autorizado'}); return null; } return user; }
-function serveFile(res, file) { const safe=path.basename(file || 'index.html'); const target=path.join(__dirname, safe); const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'}; fs.readFile(target,(err,data)=>{ if(err) return json(res,404,{error:'No encontrado'}); res.writeHead(200,{'Content-Type':types[path.extname(target)]||'application/octet-stream'}); res.end(data); }); }
-
-const server = http.createServer(async (req,res)=>{
-  try {
-    const url=new URL(req.url,`http://${req.headers.host}`); const method=req.method;
-
-    // LOGIN
-    if(method==='POST' && url.pathname==='/api/auth/login') { 
-      const {email,password}=await body(req); 
-      const client = await pool.connect();
-      try {
-        const result = await client.query('SELECT * FROM users WHERE email = $1', [email?.toLowerCase()]);
-        const user = result.rows[0];
-        if(!user || user.password !== password) return json(res,401,{error:'Credenciales inválidas'}); 
-        return json(res,200,{token:token({sub:email,role:user.role,exp:Math.floor(Date.now()/1000)+28800}),user:{name:user.name,role:user.role}});
-      } finally {
-        client.release();
-      }
-    }
-
-    // RUTA ACTUAL (DRIVER)
-    if(method==='GET' && url.pathname==='/api/routes/current') { 
-      if(!auth(req,res,['driver'])) return; 
-      const client = await pool.connect();
-      try {
-        const routeRes = await client.query('SELECT * FROM routes LIMIT 1');
-        const routeData = routeRes.rows[0];
-        const ordersRes = await client.query('SELECT order_code as id, customer, address, status, notes FROM orders WHERE route_id = $1', [routeData.id]);
-        
-        const orders = ordersRes.rows.map(o => ({
-          ...o,
-          items: [['Bebida isotónica 500ml', 12], ['Agua mineral 1.5L', 8]]
-        }));
-
-        return json(res,200, {
-          id: routeData.route_code,
-          zone: routeData.zone,
-          driver: routeData.driver_name,
-          finalized: routeData.finalized,
-          orders
-        });
-      } finally {
-        client.release();
-      }
-    }
-
-    // ACTUALIZAR PEDIDO (DRIVER)
-    if(method==='PUT' && url.pathname.startsWith('/api/orders/')) { 
-      if(!auth(req,res,['driver'])) return; 
-      const orderCode = url.pathname.split('/').pop();
-      const {status,notes=''}=await body(req); 
-      if(!['Completa','Parcial'].includes(status)) return json(res,422,{error:'Estado inválido'});
-      
-      const client = await pool.connect();
-      try {
-        const updateRes = await client.query(
-          'UPDATE orders SET status = $1, notes = $2, updated_at = NOW() WHERE order_code = $3 RETURNING order_code as id, customer, address, status, notes',
-          [status, notes, orderCode]
-        );
-        if(updateRes.rows.length === 0) return json(res,404,{error:'Pedido inexistente'});
-        return json(res,200, updateRes.rows[0]);
-      } finally {
-        client.release();
-      }
-    }
-
-    // FINALIZAR RUTA (DRIVER)
-    if(method==='POST' && url.pathname==='/api/routes/current/finalize') { 
-      if(!auth(req,res,['driver'])) return; 
-      const client = await pool.connect();
-      try {
-        const pendingCheck = await client.query("SELECT * FROM orders WHERE status = 'Pendiente'");
-        if(pendingCheck.rows.length > 0) return json(res,422,{error:'Existen pedidos pendientes'});
-        
-        const updateRoute = await client.query('UPDATE routes SET finalized = true, finalized_at = NOW() RETURNING *');
-        return json(res,200, updateRoute.rows[0]);
-      } finally {
-        client.release();
-      }
-    }
-
-    // OPERACIONES ADMIN
-    if(method==='GET' && url.pathname==='/api/admin/operations') { 
-      if(!auth(req,res,['admin'])) return; 
-      const client = await pool.connect();
-      try {
-        const routeRes = await client.query('SELECT * FROM routes LIMIT 1');
-        const routeData = routeRes.rows[0];
-        const ordersRes = await client.query('SELECT order_code as id, customer, address, status, notes FROM orders WHERE route_id = $1', [routeData.id]);
-        
-        return json(res,200, {
-          routes: [{
-            id: routeData.route_code,
-            zone: routeData.zone,
-            driver: routeData.driver_name,
-            finalized: routeData.finalized,
-            orders: ordersRes.rows
-          }]
-        });
-      } finally {
-        client.release();
-      }
-    }
-
-    if(method==='GET') return serveFile(res,url.pathname==='/'?'index.html':url.pathname.slice(1));
-    json(res,404,{error:'No encontrado'});
-  } catch (error) { 
-    console.error(error);
-    json(res,400,{error:'Solicitud inválida o error en base de datos'}); 
+function assertConfiguration() {
+  if (!SECRET || !SUPABASE_URL || !SUPABASE_KEY) {
+    throw new Error('Missing JWT_SECRET, SUPABASE_URL, or SUPABASE_SERVICE_ROLE_KEY');
   }
-});
-
-// Si estamos en local (fuera de Vercel), levantamos el servidor con listen
-if (!process.env.VERCEL) {
-  server.listen(PORT, () => console.log(`RutaLog con Supabase disponible en http://localhost:${PORT}`));
 }
 
-// Exportamos para que Vercel pueda manejarlo como Serverless Function
-module.exports = server;
+async function supabase(table, { method = 'GET', query = '', body } = {}) {
+  assertConfiguration();
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      ...(method !== 'GET' ? { Prefer: 'return=representation' } : {})
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+  });
+  if (!response.ok) throw new Error(`Supabase responded ${response.status} while accessing ${table}`);
+  return response.json();
+}
+
+const b64url = value => Buffer.from(value).toString('base64url');
+function token(payload) {
+  assertConfiguration();
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const data = b64url(JSON.stringify(payload));
+  const signature = crypto.createHmac('sha256', SECRET).update(`${header}.${data}`).digest('base64url');
+  return `${header}.${data}.${signature}`;
+}
+function verify(value) {
+  try {
+    const [header, data, signature] = value.split('.');
+    const expected = crypto.createHmac('sha256', SECRET).update(`${header}.${data}`).digest('base64url');
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString());
+    return payload.exp > Date.now() / 1000 ? payload : null;
+  } catch { return null; }
+}
+function json(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(data));
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch (error) { reject(error); } });
+  });
+}
+function auth(req, res, roles) {
+  const value = (req.headers.authorization || '').replace('Bearer ', '');
+  const user = verify(value);
+  if (!user || !roles.includes(user.role)) {
+    json(res, 403, { error: 'No autorizado' });
+    return null;
+  }
+  return user;
+}
+function mapOrder(order) {
+  return {
+    id: order.order_code,
+    customer: order.customer,
+    address: order.address,
+    status: order.status,
+    notes: order.notes,
+    items: [['Bebida isotónica 500ml', 12], ['Agua mineral 1.5L', 8]]
+  };
+}
+
+async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.end();
+
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const path = url.pathname;
+    const method = req.method;
+
+    if (!path.startsWith('/api/')) {
+      if (process.env.VERCEL) return json(res, 404, { error: 'API route not found' });
+      const fs = require('fs');
+      const filePath = path === '/' ? 'index.html' : path.slice(1);
+      const safePath = !filePath.includes('..') && /^[a-zA-Z0-9._/-]+$/.test(filePath) ? filePath : '';
+      const target = safePath ? require('path').join(process.cwd(), safePath) : '';
+      if (!target || !fs.existsSync(target) || fs.statSync(target).isDirectory()) return json(res, 404, { error: 'Not found' });
+      const extension = require('path').extname(target);
+      const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+      res.writeHead(200, { 'Content-Type': types[extension] || 'application/octet-stream' });
+      return res.end(fs.readFileSync(target));
+    }
+
+    if (method === 'POST' && path === '/api/auth/login') {
+      const { email, password } = await readBody(req);
+      const users = await supabase('users', { query: `email=eq.${encodeURIComponent(String(email || '').toLowerCase())}&limit=1` });
+      const user = users[0];
+      if (!user || user.password !== password) return json(res, 401, { error: 'Credenciales inválidas' });
+      return json(res, 200, {
+        token: token({ sub: user.email, role: user.role, exp: Math.floor(Date.now() / 1000) + 28800 }),
+        user: { name: user.name, role: user.role }
+      });
+    }
+
+    if (method === 'GET' && path === '/api/routes/current') {
+      if (!auth(req, res, ['driver'])) return;
+      const route = (await supabase('routes', { query: 'limit=1' }))[0];
+      if (!route) return json(res, 404, { error: 'Ruta no encontrada' });
+      const orders = await supabase('orders', { query: `route_id=eq.${route.id}&order=order_code.asc` });
+      return json(res, 200, { id: route.route_code, zone: route.zone, driver: route.driver_name, finalized: route.finalized, orders: orders.map(mapOrder) });
+    }
+
+    if (method === 'PUT' && path.startsWith('/api/orders/')) {
+      if (!auth(req, res, ['driver'])) return;
+      const orderCode = decodeURIComponent(path.split('/').pop());
+      const { status, notes = '' } = await readBody(req);
+      if (!['Completa', 'Parcial'].includes(status)) return json(res, 422, { error: 'Estado inválido' });
+      const updated = await supabase('orders', {
+        method: 'PATCH', query: `order_code=eq.${encodeURIComponent(orderCode)}`,
+        body: { status, notes, updated_at: new Date().toISOString() }
+      });
+      if (!updated[0]) return json(res, 404, { error: 'Pedido inexistente' });
+      return json(res, 200, mapOrder(updated[0]));
+    }
+
+    if (method === 'POST' && path === '/api/routes/current/finalize') {
+      if (!auth(req, res, ['driver'])) return;
+      const route = (await supabase('routes', { query: 'limit=1' }))[0];
+      if (!route) return json(res, 404, { error: 'Ruta no encontrada' });
+      const pending = await supabase('orders', { query: `route_id=eq.${route.id}&status=eq.Pendiente` });
+      if (pending.length) return json(res, 422, { error: 'Existen pedidos pendientes' });
+      const updated = await supabase('routes', { method: 'PATCH', query: `id=eq.${route.id}`, body: { finalized: true, finalized_at: new Date().toISOString() } });
+      return json(res, 200, updated[0]);
+    }
+
+    if (method === 'GET' && path === '/api/admin/operations') {
+      if (!auth(req, res, ['admin'])) return;
+      const route = (await supabase('routes', { query: 'limit=1' }))[0];
+      if (!route) return json(res, 404, { error: 'Ruta no encontrada' });
+      const orders = await supabase('orders', { query: `route_id=eq.${route.id}&order=order_code.asc` });
+      return json(res, 200, { routes: [{ id: route.route_code, zone: route.zone, driver: route.driver_name, finalized: route.finalized, orders: orders.map(mapOrder) }] });
+    }
+    return json(res, 404, { error: 'Endpoint API no encontrado' });
+  } catch (error) {
+    console.error(error);
+    return json(res, 500, { error: error.message || 'Error interno del servidor' });
+  }
+}
+
+if (!process.env.VERCEL && require.main === module) {
+  http.createServer(handler).listen(PORT, () => console.log(`RutaLog running on http://localhost:${PORT}`));
+}
+
+module.exports = handler;
