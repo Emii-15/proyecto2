@@ -132,22 +132,7 @@ const server = http.createServer(async (req,res)=>{
   }
 });
 
-// Si estamos en local (fuera de Vercel), levantamos el servidor con listen
-if (!process.env.VERCEL) {
-  server.listen(PORT, () => console.log(`RutaLog con Supabase disponible en http://localhost:${PORT}`));
-}
-
-// Exportamos para que Vercel pueda manejarlo como Serverless Function
-module.exports = server;
-
-
-// En lugar de usar const server = http.createServer... y exportarlo suelto,
-// exportamos directamente la función de creación del servidor para Vercel:
-
-const server = http.createServer(async (req, res) => {
-  // ... (todo tu código de rutas, login, base de datos, etc. queda exactamente igual adentro)
-});
-
+// Si estamos en local, levantamos el servidor tradicional
 if (!process.env.VERCEL) {
   server.listen(PORT, () => console.log(`RutaLog con Supabase disponible en http://localhost:${PORT}`));
 }
