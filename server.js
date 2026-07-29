@@ -16,11 +16,13 @@ function assertConfiguration() {
 
 async function supabase(table, { method = 'GET', query = '', body } = {}) {
   assertConfiguration();
+  const credentials = SUPABASE_KEY.startsWith('sb_secret_')
+    ? { apikey: SUPABASE_KEY }
+    : { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` };
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
     method,
     headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
+      ...credentials,
       'Content-Type': 'application/json',
       ...(method !== 'GET' ? { Prefer: 'return=representation' } : {})
     },
